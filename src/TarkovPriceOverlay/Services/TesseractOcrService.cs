@@ -15,6 +15,8 @@ public sealed class TesseractOcrService : IOcrService, IConfigurableOcrLayoutSer
     private readonly object _userWordsLock = new();
     public TesseractOcrService(AppSettings settings) => _settings = settings;
 
+    public bool IsAvailable => File.Exists(ResolveExecutable());
+
     public async Task<string> RecognizeAsync(Bitmap image, CancellationToken ct = default)
     {
         var directory = Path.Combine(Path.GetTempPath(), "TarkovPriceOverlay");
@@ -188,7 +190,7 @@ public sealed class TesseractOcrService : IOcrService, IConfigurableOcrLayoutSer
         var installed = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             "Tesseract-OCR", "tesseract.exe");
-        return File.Exists(installed) ? installed : "tesseract.exe";
+        return File.Exists(installed) ? installed : bundled;
     }
 
     private string ResolveTessdata(string executable)
