@@ -5,8 +5,8 @@ namespace TarkovPriceOverlay.Services;
 
 /// <summary>
 /// Combines PP-OCRv6's small-Chinese recognition with the established
-/// Tesseract channel. If the neural model cannot initialize, Tesseract still
-/// provides the complete legacy behavior.
+/// optional Tesseract compatibility channel. Release builds can run with the
+/// bundled neural models alone when Tesseract is not installed.
 /// </summary>
 public sealed class HybridOcrService : IOcrService, IConfigurableOcrLayoutService
 {
@@ -19,9 +19,8 @@ public sealed class HybridOcrService : IOcrService, IConfigurableOcrLayoutServic
     public async Task<string> RecognizeAsync(Bitmap image, CancellationToken ct = default)
     {
         using var paddleImage = (Bitmap)image.Clone();
-        using var tesseractImage = (Bitmap)image.Clone();
         var paddleTask = TryPaddleTextAsync(paddleImage, ct);
-        var tesseractTask = _tesseract.RecognizeAsync(tesseractImage, ct);
+        var tesseractTask = TryTesseractTextAsync(image, ct);
         await Task.WhenAll(paddleTask, tesseractTask);
         return string.Join(Environment.NewLine,
             new[] { await paddleTask, await tesseractTask }
@@ -40,10 +39,8 @@ public sealed class HybridOcrService : IOcrService, IConfigurableOcrLayoutServic
         Bitmap image, bool useAllLanguageOrders, CancellationToken ct = default)
     {
         using var paddleImage = (Bitmap)image.Clone();
-        using var tesseractImage = (Bitmap)image.Clone();
         var paddleTask = TryPaddleBlocksAsync(paddleImage, ct);
-        var tesseractTask = _tesseract.RecognizeBlocksAsync(
-            tesseractImage, useAllLanguageOrders, ct);
+        var tesseractTask = TryTesseractBlocksAsync(image, useAllLanguageOrders, ct);
         await Task.WhenAll(paddleTask, tesseractTask);
         return Merge(await paddleTask, await tesseractTask);
     }
@@ -58,6 +55,23 @@ public sealed class HybridOcrService : IOcrService, IConfigurableOcrLayoutServic
         Bitmap image, CancellationToken ct)
     {
         try { return await _paddle.RecognizeBlocksAsync(image, ct); }
+        catch when (!ct.IsCancellationRequested) { return []; }
+    }
+
+    private async Task<string> TryTesseractTextAsync(Bitmap image, CancellationToken ct)
+    {
+        if (!_tesseract.IsAvailable) return "";
+        using var clone = (Bitmap)image.Clone();
+        try { return await _tesseract.RecognizeAsync(clone, ct); }
+        catch when (!ct.IsCancellationRequested) { return ""; }
+    }
+
+    private async Task<IReadOnlyList<OcrTextBlock>> TryTesseractBlocksAsync(
+        Bitmap image, bool useAllLanguageOrders, CancellationToken ct)
+    {
+        if (!_tesseract.IsAvailable) return [];
+        using var clone = (Bitmap)image.Clone();
+        try { return await _tesseract.RecognizeBlocksAsync(clone, useAllLanguageOrders, ct); }
         catch when (!ct.IsCancellationRequested) { return []; }
     }
 
