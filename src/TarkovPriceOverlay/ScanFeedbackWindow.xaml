@@ -1,0 +1,15 @@
+<Window x:Class="TarkovPriceOverlay.ScanFeedbackWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        ShowInTaskbar="False" Topmost="True" ShowActivated="False"
+        Width="132" Height="34" SizeToContent="WidthAndHeight">
+  <Border Background="#F00B0D0C" BorderBrush="#8D7B55" BorderThickness="1"
+          CornerRadius="0" Padding="9,6">
+    <StackPanel Orientation="Horizontal">
+      <Rectangle Width="5" Height="12" Fill="#B99A55" Margin="0,0,8,0" VerticalAlignment="Center"/>
+      <TextBlock x:Name="MessageText" Text="正在扫描…" Foreground="#D7D2C6"
+                 FontFamily="Microsoft YaHei UI" FontSize="11" FontWeight="SemiBold"/>
+    </StackPanel>
+  </Border>
+</Window>
