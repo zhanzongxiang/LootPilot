@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+
+- Fixed release builds failing to scan when `tesseract.exe` is not installed.
+- Tesseract is now an optional compatibility channel; bundled neural OCR remains available by default.
+- Added publish-time validation for bundled OCR model assets.
+
 ## 0.11.0 - 2026-08-09
 
 - 首次公开源码与测试版发布。
