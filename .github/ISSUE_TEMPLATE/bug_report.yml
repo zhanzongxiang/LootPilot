@@ -1,0 +1,27 @@
+name: Bug report
+description: 报告可复现的问题
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: 问题描述
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: LootPilot 版本
+      placeholder: 0.11.0
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 环境
+      description: Windows 版本、分辨率、显示缩放、游戏显示模式
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 复现步骤与错误信息
+    validations:
+      required: true
