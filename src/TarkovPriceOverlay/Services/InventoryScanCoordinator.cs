@@ -12,6 +12,7 @@ public sealed class InventoryScanCoordinator
     private readonly IOcrLayoutService _ocr;
     private readonly ItemCatalogService _catalog;
     private readonly AppSettings _settings;
+    private readonly SemaphoreSlim _gridConcurrency = new(2, 2);
 
     public InventoryScanCoordinator(
         ScreenCaptureService capture,
@@ -51,17 +52,26 @@ public sealed class InventoryScanCoordinator
             foreach (var grid in grids)
                 collected.AddRange(await ScanGridAsync(frame, grid,
                     useAllLanguageOrders: false, scale: 1,
-                    neuralOnly: true, enableCellFallback: false, ct,
+                    neuralOnly: true, ct,
                     occupiedByGrid[grid]));
             matches = collected;
         }
         else if (mode.Equals("Parallel", StringComparison.OrdinalIgnoreCase))
         {
-            var collected = new List<DetectedInventoryItem>();
-            foreach (var grid in grids)
-                collected.AddRange(await ScanQualityGridAsync(
-                    frame, grid, precise: true, occupiedByGrid[grid], ct));
-            matches = collected;
+            var tasks = grids.Select(async grid =>
+            {
+                await _gridConcurrency.WaitAsync(ct);
+                try
+                {
+                    return await ScanQualityGridAsync(
+                        frame, grid, precise: true, occupiedByGrid[grid], ct);
+                }
+                finally
+                {
+                    _gridConcurrency.Release();
+                }
+            });
+            matches = (await Task.WhenAll(tasks)).SelectMany(items => items).ToList();
         }
         else
         {
@@ -86,7 +96,7 @@ public sealed class InventoryScanCoordinator
         if (occupied.Count == 0) return [];
         var baseline = await ScanGridAsync(frame, grid,
             useAllLanguageOrders: false, scale: 1,
-            neuralOnly: true, enableCellFallback: false, ct, occupied);
+            neuralOnly: true, ct, occupied);
         var fallback = await ScanUnmatchedCellsBatchAsync(
             frame, grid, occupied, baseline, useHybridOcr: false, ct);
         var combined = baseline.Concat(fallback).ToList();
@@ -97,7 +107,7 @@ public sealed class InventoryScanCoordinator
         {
             var enhanced = await ScanGridAsync(frame, grid,
                 useAllLanguageOrders: false, scale: _settings.OcrImageScale,
-                neuralOnly: true, enableCellFallback: false, ct, occupied);
+                neuralOnly: true, ct, occupied);
             combined.AddRange(enhanced);
         }
         if (precise)
@@ -111,14 +121,17 @@ public sealed class InventoryScanCoordinator
 
     private async Task<IReadOnlyList<DetectedInventoryItem>> ScanGridAsync(
         CapturedRegion frame, InventoryGridRegion grid, bool useAllLanguageOrders,
-        int scale, bool neuralOnly, bool enableCellFallback, CancellationToken ct,
+        int scale, bool neuralOnly, CancellationToken ct,
         IReadOnlySet<(int Column, int Row)>? occupiedCells = null)
     {
         var broadCarriedArea = grid.Kind == "随身区域";
         var occupied = occupiedCells ?? DetectOccupiedCells(frame.Image, grid);
         if (occupied.Count == 0) return [];
 
-        using var crop = frame.Image.Clone(grid.Bounds, frame.Image.PixelFormat);
+        Bitmap cropImage;
+        lock (frame.Image)
+            cropImage = frame.Image.Clone(grid.Bounds, frame.Image.PixelFormat);
+        using var crop = cropImage;
         using var enhanced = OcrImagePreprocessor.CreatePrimaryVariant(crop, scale);
         var scaleX = enhanced.Width / (double)crop.Width;
         var scaleY = enhanced.Height / (double)crop.Height;
@@ -191,14 +204,12 @@ public sealed class InventoryScanCoordinator
                 ? cell.Key.Column
                 : EstimateAnchorColumn(anchor.Word, item, scaleX, grid);
             var anchorRow = anchor.Word is null ? cell.Key.Row : anchor.Row;
-            var bounds = CreateItemBounds(frame, grid, anchorColumn, anchorRow,
-                item.Width, item.Height);
+            Rectangle bounds;
+            lock (frame.Image)
+                bounds = CreateItemBounds(frame, grid, anchorColumn, anchorRow,
+                    item.Width, item.Height);
             matches.Add(new(item, bounds, combined, grid.Kind, text));
         }
-        if (enableCellFallback &&
-            grid.Kind is "弹挂" or "口袋" or "背包" or "安全箱")
-            matches.AddRange(await ScanUnmatchedCellsBatchAsync(
-                frame, grid, occupied, matches, useHybridOcr: false, ct));
         return matches;
     }
 
@@ -262,10 +273,11 @@ public sealed class InventoryScanCoordinator
                     if (right <= left || bottom <= top) continue;
                     var tileColumn = index % tilesPerRow;
                     var tileRow = index / tilesPerRow;
-                    graphics.DrawImage(frame.Image,
-                        new Rectangle(tileColumn * strideWidth + padding,
-                            tileRow * strideHeight + padding, tileWidth, tileHeight),
-                        Rectangle.FromLTRB(left, top, right, bottom), GraphicsUnit.Pixel);
+                    lock (frame.Image)
+                        graphics.DrawImage(frame.Image,
+                            new Rectangle(tileColumn * strideWidth + padding,
+                                tileRow * strideHeight + padding, tileWidth, tileHeight),
+                            Rectangle.FromLTRB(left, top, right, bottom), GraphicsUnit.Pixel);
                 }
             }
 
@@ -289,9 +301,10 @@ public sealed class InventoryScanCoordinator
                 if (item is null || score < 0.84) continue;
                 var confidence = score * 0.8 + cell.Average(block => block.Confidence) * 0.2;
                 if (confidence < 0.78) continue;
-                results.Add(new(item,
-                    CreateItemBounds(frame, grid, column, row, item.Width, item.Height),
-                    confidence, grid.Kind, text));
+                Rectangle bounds;
+                lock (frame.Image)
+                    bounds = CreateItemBounds(frame, grid, column, row, item.Width, item.Height);
+                results.Add(new(item, bounds, confidence, grid.Kind, text));
             }
         }
         return results;
@@ -501,27 +514,6 @@ public sealed class InventoryScanCoordinator
         for (var x = column - 1; x <= column + 1; x++)
             if (occupied.Contains((x, y))) return true;
         return false;
-    }
-
-    private static bool IsNearbyContaminatedDuplicate(
-        DetectedInventoryItem first,
-        DetectedInventoryItem second)
-    {
-        var firstText = NormalizeText(first.RawText);
-        var secondText = NormalizeText(second.RawText);
-        if (firstText == secondText ||
-            !firstText.Contains(secondText, StringComparison.OrdinalIgnoreCase) &&
-            !secondText.Contains(firstText, StringComparison.OrdinalIgnoreCase))
-            return false;
-        var firstCenter = new PointF(
-            first.ScreenBounds.Left + first.ScreenBounds.Width / 2f,
-            first.ScreenBounds.Top + first.ScreenBounds.Height / 2f);
-        var secondCenter = new PointF(
-            second.ScreenBounds.Left + second.ScreenBounds.Width / 2f,
-            second.ScreenBounds.Top + second.ScreenBounds.Height / 2f);
-        var dx = firstCenter.X - secondCenter.X;
-        var dy = firstCenter.Y - secondCenter.Y;
-        return Math.Sqrt(dx * dx + dy * dy) <= 170;
     }
 
     private static int EstimateAnchorColumn(

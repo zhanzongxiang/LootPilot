@@ -29,7 +29,6 @@ public sealed class DynamicInventoryGridDetector
         var topMin = (int)Math.Round(oy + 105 * sy);
         var topMax = Math.Min(frame.Height - 3, (int)Math.Round(oy + 950 * sy));
         var seedLeft = (int)Math.Round(ox + 786 * sx);
-        var seedRight = Math.Min(frame.Width - 1, (int)Math.Round(ox + 1110 * sx));
         var iconLeft = (int)Math.Round(ox + 654 * sx);
         var iconRight = (int)Math.Round(ox + 785 * sx);
         var iconHeight = (int)Math.Round(127 * sy);

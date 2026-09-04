@@ -18,4 +18,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - run: dotnet restore TarkovPriceOverlay.sln
-      - run: dotnet build TarkovPriceOverlay.sln --configuration Release --no-restore
+      - run: dotnet test TarkovPriceOverlay.sln --configuration Release --no-restore
+      - name: Verify self-contained publish
+        shell: pwsh
+        run: .\scripts\publish.ps1 -SkipTests

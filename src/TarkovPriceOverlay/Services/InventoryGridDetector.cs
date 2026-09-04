@@ -24,8 +24,6 @@ public sealed record InventoryGridRegion(
 /// </summary>
 public sealed class InventoryGridDetector : IInventoryGridDetector
 {
-    private const float ReferenceWidth = 1920f;
-    private const float ReferenceHeight = 1080f;
     private const float ReferenceCell = 63.5f;
     private readonly AppSettings _settings;
     private readonly DynamicInventoryGridDetector _dynamicGridDetector;
@@ -123,32 +121,6 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
         var bottom = Math.Min(frame.Height, (int)Math.Round(y + rows * cellHeight));
         return new(Rectangle.FromLTRB(x, y, right, bottom), columns, rows,
             cellWidth, cellHeight, kind, confidence);
-    }
-
-    /// <summary>
-    /// One broad carried-items surface. Tarkov moves pocket/backpack/secure
-    /// layouts between equipment states, so treating each as a fixed small
-    /// rectangle caused edge columns to disappear. The broad surface starts at
-    /// the left edge of pockets and ends at the right edge of the rig/backpack.
-    /// </summary>
-    private InventoryGridRegion? DetectCarriedArea(Bitmap frame, int verticalOffset)
-    {
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
-        var sx = transform.ScaleX;
-        var sy = transform.ScaleY;
-        var left = transform.X(648f);
-        var top = transform.Y(145f) + verticalOffset;
-        var right = Math.Min(frame.Width, transform.X(1158f));
-        var bottom = Math.Min(frame.Height, transform.Y(952f) + verticalOffset);
-        if (right - left < 300 || bottom - top < 400) return null;
-        const int columns = 8;
-        const int rows = 13;
-        return new(
-            Rectangle.FromLTRB(left, top, right, bottom),
-            columns, rows,
-            (right - left) / (float)columns,
-            (bottom - top) / (float)rows,
-            "随身区域", 0.86);
     }
 
     private InventoryGridRegion? DetectRightPanel(Bitmap frame)

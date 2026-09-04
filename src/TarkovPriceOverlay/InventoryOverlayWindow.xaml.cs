@@ -5,6 +5,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using TarkovPriceOverlay.Models;
+using TarkovPriceOverlay.Services;
 using WinForms = System.Windows.Forms;
 using MediaColor = System.Windows.Media.Color;
 
@@ -15,6 +16,7 @@ public partial class InventoryOverlayWindow : Window
     private readonly IReadOnlyList<DetectedInventoryItem> _items;
     private readonly int _durationMs;
     private readonly int _minimumDisplayPrice;
+    private readonly double _screenScale;
 
     public InventoryOverlayWindow(IReadOnlyList<DetectedInventoryItem> items, int durationMs,
         int minimumDisplayPrice = 0)
@@ -25,15 +27,16 @@ public partial class InventoryOverlayWindow : Window
             ? new System.Drawing.Point(items[0].ScreenBounds.X, items[0].ScreenBounds.Y)
             : WinForms.Cursor.Position;
         var screen = WinForms.Screen.FromPoint(point).Bounds;
-        Left = screen.Left;
-        Top = screen.Top;
-        Width = screen.Width;
-        Height = screen.Height;
+        var screenDevice = WinForms.Screen.FromPoint(point);
+        _screenScale = ScreenCoordinateMapper.GetScale(screenDevice);
+        Width = screen.Width / _screenScale;
+        Height = screen.Height / _screenScale;
         SourceInitialized += (_, _) =>
         {
             var hwnd = new WindowInteropHelper(this).Handle;
             var style = GetWindowLong(hwnd, -20);
             SetWindowLong(hwnd, -20, style | 0x00000020 | 0x08000000);
+            ScreenCoordinateMapper.SetBoundsPhysical(this, screen);
         };
         Loaded += (_, _) => Populate(screen.Left, screen.Top);
     }
@@ -60,8 +63,8 @@ public partial class InventoryOverlayWindow : Window
             };
             label.Measure(new System.Windows.Size(
                 double.PositiveInfinity, double.PositiveInfinity));
-            Canvas.SetLeft(label, detected.ScreenBounds.Left - originX + 2);
-            Canvas.SetTop(label, detected.ScreenBounds.Bottom - originY -
+            Canvas.SetLeft(label, (detected.ScreenBounds.Left - originX) / _screenScale + 2);
+            Canvas.SetTop(label, (detected.ScreenBounds.Bottom - originY) / _screenScale -
                                  label.DesiredSize.Height - 2);
             OverlayCanvas.Children.Add(label);
         }

@@ -4,16 +4,29 @@ namespace TarkovPriceOverlay.Services;
 
 public sealed class ItemCatalogService
 {
+    private static readonly TimeSpan DefaultMetadataTimeout = TimeSpan.FromSeconds(8);
     private readonly JsonItemCache _cache;
     private readonly IReadOnlyList<IPriceDataSource> _sources;
+    private readonly TimeSpan _metadataTimeout;
     private List<ItemPrice> _items = [];
+    private Dictionary<string, IReadOnlyList<ItemPrice>> _fullNames = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, IReadOnlyList<ItemPrice>> _shortNames = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<(ItemPrice Item, string Alias)> _uniqueAliases = [];
     public DateTimeOffset? UpdatedAt { get; private set; }
     public string? LastRefreshError { get; private set; }
     public string CurrentSource { get; private set; } = "无";
     public int Count => _items.Count;
 
     public ItemCatalogService(JsonItemCache cache, IReadOnlyList<IPriceDataSource> sources)
-        => (_cache, _sources) = (cache, sources);
+        : this(cache, sources, DefaultMetadataTimeout) { }
+
+    internal ItemCatalogService(JsonItemCache cache, IReadOnlyList<IPriceDataSource> sources,
+        TimeSpan metadataTimeout)
+    {
+        if (metadataTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(metadataTimeout));
+        (_cache, _sources, _metadataTimeout) = (cache, sources, metadataTimeout);
+    }
 
     public async Task<bool> InitializeAsync(CancellationToken ct = default)
     {
@@ -26,12 +39,12 @@ public sealed class ItemCatalogService
         var cached = await _cache.LoadAsync(ct);
         if (cached is null)
         {
-            _items = [];
+            SetItems([]);
             UpdatedAt = null;
             CurrentSource = "无缓存";
             return false;
         }
-        _items = cached.Items;
+        SetItems(cached.Items);
         UpdatedAt = cached.UpdatedAt;
         CurrentSource = cached.Source;
         return true;
@@ -40,14 +53,26 @@ public sealed class ItemCatalogService
     public async Task<bool> RefreshAsync(CancellationToken ct = default)
     {
         var errors = new List<string>();
-        foreach (var source in _sources)
+        for (var sourceIndex = 0; sourceIndex < _sources.Count; sourceIndex++)
         {
+            var source = _sources[sourceIndex];
             try
             {
-                var fresh = MergeUsageFlags(await source.FetchItemsAsync(ct));
+                var fresh = NormalizeItems(await source.FetchItemsAsync(ct));
+                if (fresh.Count < source.MinimumExpectedItemCount)
+                    throw new InvalidDataException(
+                        $"{source.Name} 返回的有效物品仅 {fresh.Count} 件，低于安全阈值 " +
+                        $"{source.MinimumExpectedItemCount}，已保留原缓存。");
+
+                // eftarkov carries the current prices and names, while the
+                // secondary source can fill in task/hideout usage flags.
+                IReadOnlyList<ItemPrice>? metadata = null;
+                if (sourceIndex == 0 && _sources.Count > 1)
+                    metadata = await TryFetchMetadataAsync(sourceIndex + 1, ct);
+                fresh = MergeUsageFlags(fresh, metadata);
                 var envelope = new CacheEnvelope(DateTimeOffset.UtcNow, fresh, source.Name);
                 await _cache.SaveAsync(envelope, ct);
-                _items = fresh;
+                SetItems(fresh);
                 UpdatedAt = envelope.UpdatedAt;
                 CurrentSource = source.Name;
                 LastRefreshError = null;
@@ -62,51 +87,115 @@ public sealed class ItemCatalogService
         return false;
     }
 
-    private List<ItemPrice> MergeUsageFlags(List<ItemPrice> fresh)
+    private List<ItemPrice> MergeUsageFlags(
+        List<ItemPrice> fresh, IReadOnlyList<ItemPrice>? metadata)
     {
-        if (_items.Count == 0) return fresh;
-        var oldById = _items.ToDictionary(x => x.Id, StringComparer.OrdinalIgnoreCase);
+        var oldById = _items
+            .GroupBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
+        var metadataById = metadata?
+            .GroupBy(x => x.Id, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.First(), StringComparer.OrdinalIgnoreCase);
         return fresh.Select(item =>
         {
-            if (!oldById.TryGetValue(item.Id, out var old)) return item;
+            oldById.TryGetValue(item.Id, out var old);
+            ItemPrice? metadataItem = null;
+            metadataById?.TryGetValue(item.Id, out metadataItem);
             return item with
             {
-                UsedInTasks = item.UsedInTasks || old.UsedInTasks,
-                UsedInHideout = item.UsedInHideout || old.UsedInHideout
+                UsedInTasks = item.UsedInTasks || old?.UsedInTasks == true || metadataItem?.UsedInTasks == true,
+                UsedInHideout = item.UsedInHideout || old?.UsedInHideout == true || metadataItem?.UsedInHideout == true
             };
         }).ToList();
     }
+
+    private async Task<IReadOnlyList<ItemPrice>?> TryFetchMetadataAsync(
+        int startIndex, CancellationToken ct)
+    {
+        for (var index = startIndex; index < _sources.Count; index++)
+        {
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(_metadataTimeout);
+                var metadata = NormalizeItems(
+                    await _sources[index].FetchItemsAsync(timeoutCts.Token));
+                if (metadata.Count >= _sources[index].MinimumExpectedItemCount) return metadata;
+            }
+            catch (Exception) when (!ct.IsCancellationRequested)
+            {
+                // Metadata is supplemental. A price refresh remains valid when
+                // the enrichment endpoint is unavailable.
+            }
+        }
+        return null;
+    }
+
+    private static List<ItemPrice> NormalizeItems(IEnumerable<ItemPrice> items) => items
+        .Where(item => !string.IsNullOrWhiteSpace(item.Id) && !string.IsNullOrWhiteSpace(item.Name))
+        .GroupBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.First())
+        .ToList();
+
+    private void SetItems(IEnumerable<ItemPrice> items)
+    {
+        _items = NormalizeItems(items);
+        _fullNames = BuildAliasIndex(_items.Select(item => (Normalize(item.Name), item)));
+        _shortNames = BuildAliasIndex(_items.Select(item => (Normalize(item.ShortName), item)));
+        var aliases = _items
+            .SelectMany(item => new[] { (Alias: Normalize(item.Name), Item: item),
+                                        (Alias: Normalize(item.ShortName), Item: item) })
+            .Where(entry => entry.Alias.Length > 0)
+            .GroupBy(entry => entry.Alias, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<ItemPrice>)group
+                    .GroupBy(entry => entry.Item.Id, StringComparer.OrdinalIgnoreCase)
+                    .Select(entry => entry.First().Item)
+                    .ToList(),
+                StringComparer.OrdinalIgnoreCase);
+        _uniqueAliases = aliases
+            .Where(entry => entry.Value.Count == 1)
+            .Select(entry => (entry.Value[0], entry.Key))
+            .ToList();
+    }
+
+    private static Dictionary<string, IReadOnlyList<ItemPrice>> BuildAliasIndex(
+        IEnumerable<(string Alias, ItemPrice Item)> aliases) => aliases
+        .Where(entry => entry.Alias.Length > 0)
+        .GroupBy(entry => entry.Alias, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(
+            group => group.Key,
+            group => (IReadOnlyList<ItemPrice>)group
+                .GroupBy(entry => entry.Item.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(entry => entry.First().Item)
+                .ToList(),
+            StringComparer.OrdinalIgnoreCase);
 
     public (ItemPrice? Item, double Score) FindBest(string text)
     {
         var normalized = Normalize(text);
         if (string.IsNullOrWhiteSpace(normalized) || _items.Count == 0) return (null, 0);
-        var candidates = _items.SelectMany(item => new[]
-        {
-            (Item: item, Name: Normalize(item.Name)),
-            (Item: item, Name: Normalize(item.ShortName))
-        }).Where(x => x.Name.Length > 0).ToList();
 
-        // Prefer a complete OCR/name match before substring matching. Without
-        // this, "VOG-17" can incorrectly select the shorter "G17" alias.
-        var exact = candidates
-            .Where(x => normalized == x.Name)
-            .OrderByDescending(x => x.Name.Length)
-            .FirstOrDefault();
-        if (exact.Item is not null) return (exact.Item, 1);
+        // A full name is authoritative even if another item happens to use it
+        // as a short name. Shared short names such as PM remain ambiguous.
+        if (_fullNames.TryGetValue(normalized, out var fullNameItems))
+            return fullNameItems.Count == 1 ? (fullNameItems[0], 1) : (null, 0);
+        if (_shortNames.TryGetValue(normalized, out var shortNameItems))
+            return shortNameItems.Count == 1 ? (shortNameItems[0], 1) : (null, 0);
 
-        exact = candidates
-            .Where(x => (x.Name.Length >= 4 || x.Name.Length >= 2 && ContainsCjk(x.Name)) &&
-                        normalized.Contains(x.Name))
-            .OrderByDescending(x => x.Name.Length)
+        var contained = _uniqueAliases
+            .Where(x => (x.Alias.Length >= 4 || x.Alias.Length >= 2 && ContainsCjk(x.Alias)) &&
+                        normalized.Contains(x.Alias, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(x => x.Alias.Length)
             .FirstOrDefault();
-        if (exact.Item is not null) return (exact.Item, 1);
+        if (contained.Item is not null) return (contained.Item, 1);
 
         // Two/three-character OCR fragments are too ambiguous for fuzzy
         // matching, but exact short names such as TT and PP still work above.
         if (normalized.Length <= 3) return (null, 0);
-        var ranked = candidates
-            .Select(x => (x.Item, Score: Similarity(normalized, x.Name)))
+        var ranked = _uniqueAliases
+            .Select(x => (x.Item, Score: Similarity(normalized, x.Alias)))
             .GroupBy(x => x.Item.Id, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(x => x.Score).First())
             .OrderByDescending(x => x.Score)

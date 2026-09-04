@@ -1,0 +1,60 @@
+name: Publish LootPilot
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.11.2"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Validate release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tag must use the form v1.2.3: $env:RELEASE_TAG"
+          }
+          $version = $Matches.version
+          [xml]$props = Get-Content .\Directory.Build.props
+          $projectVersion = [string]$props.Project.PropertyGroup.VersionPrefix
+          if ($version -ne $projectVersion) {
+            throw "Tag version $version does not match Directory.Build.props version $projectVersion."
+          }
+          "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
+          "number=$version" >> $env:GITHUB_OUTPUT
+      - name: Publish and package
+        shell: pwsh
+        run: |
+          .\scripts\publish.ps1 -Runtime win-x64
+          $version = '${{ steps.version.outputs.number }}'
+          $out = Join-Path $PWD "artifacts/LootPilot-$version-win-x64"
+          $zip = Join-Path $PWD "LootPilot-$version-win-x64.zip"
+          Compress-Archive -Path "$out\*" -DestinationPath $zip -CompressionLevel Optimal
+          $hashFile = "$zip.sha256.txt"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($zip))" | Set-Content $hashFile -Encoding ascii
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.number }}'
+          $tag = '${{ steps.version.outputs.tag }}'
+          gh release create $tag ".\LootPilot-$version-win-x64.zip" ".\LootPilot-$version-win-x64.zip.sha256.txt" --title "LootPilot $version" --generate-notes --latest --target "$env:GITHUB_SHA"

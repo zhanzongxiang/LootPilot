@@ -24,10 +24,14 @@ public partial class OverlayPositionPickerWindow : Window
                      ?? WinForms.Screen.PrimaryScreen
                      ?? WinForms.Screen.AllScreens[0];
         var area = screen.WorkingArea;
-        Left = Math.Clamp(area.Left + area.Width * Math.Clamp(_settings.FixedOverlayXRatio, 0d, 1d),
-            area.Left + 8, area.Right - Width - 8);
-        Top = Math.Clamp(area.Top + area.Height * Math.Clamp(_settings.FixedOverlayYRatio, 0d, 1d),
-            area.Top + 8, area.Bottom - Height - 8);
+        var scale = Services.ScreenCoordinateMapper.GetScale(screen);
+        var width = Width * scale;
+        var height = Height * scale;
+        var left = Math.Clamp(area.Left + area.Width * Math.Clamp(_settings.FixedOverlayXRatio, 0d, 1d),
+            area.Left + 8, area.Right - width - 8);
+        var top = Math.Clamp(area.Top + area.Height * Math.Clamp(_settings.FixedOverlayYRatio, 0d, 1d),
+            area.Top + 8, area.Bottom - height - 8);
+        Services.ScreenCoordinateMapper.MoveToPhysical(this, left, top);
     }
 
     private void DragSurface_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -38,12 +42,16 @@ public partial class OverlayPositionPickerWindow : Window
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        var center = new System.Drawing.Point((int)(Left + Width / 2), (int)(Top + Height / 2));
+        var bounds = Services.ScreenCoordinateMapper.GetPhysicalBounds(this);
+        var center = new System.Drawing.Point(
+            bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
         var screen = WinForms.Screen.FromPoint(center);
         var area = screen.WorkingArea;
         _settings.FixedOverlayScreen = screen.DeviceName;
-        _settings.FixedOverlayXRatio = Math.Clamp((Left - area.Left) / Math.Max(1d, area.Width), 0d, 1d);
-        _settings.FixedOverlayYRatio = Math.Clamp((Top - area.Top) / Math.Max(1d, area.Height), 0d, 1d);
+        _settings.FixedOverlayXRatio = Math.Clamp(
+            (bounds.Left - area.Left) / Math.Max(1d, area.Width), 0d, 1d);
+        _settings.FixedOverlayYRatio = Math.Clamp(
+            (bounds.Top - area.Top) / Math.Max(1d, area.Height), 0d, 1d);
         DialogResult = true;
     }
 

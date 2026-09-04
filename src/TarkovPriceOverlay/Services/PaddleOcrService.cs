@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -15,10 +16,19 @@ namespace TarkovPriceOverlay.Services;
 /// </summary>
 public sealed class PaddleOcrService : IOcrService, IOcrLayoutService, IDisposable
 {
-    private readonly Lazy<RapidOcr> _engine;
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    private const int EngineCount = 2;
+    private readonly Lazy<RapidOcr>[] _engines;
+    private readonly ConcurrentQueue<int> _availableEngines = new();
+    private readonly SemaphoreSlim _gate = new(EngineCount, EngineCount);
 
-    public PaddleOcrService() => _engine = new Lazy<RapidOcr>(CreateEngine, true);
+    public PaddleOcrService()
+    {
+        _engines = Enumerable.Range(0, EngineCount)
+            .Select(_ => new Lazy<RapidOcr>(CreateEngine, true))
+            .ToArray();
+        foreach (var index in Enumerable.Range(0, EngineCount))
+            _availableEngines.Enqueue(index);
+    }
 
     public async Task<string> RecognizeAsync(Bitmap image, CancellationToken ct = default)
     {
@@ -30,6 +40,11 @@ public sealed class PaddleOcrService : IOcrService, IOcrLayoutService, IDisposab
         Bitmap image, CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
+        if (!_availableEngines.TryDequeue(out var engineIndex))
+        {
+            _gate.Release();
+            throw new InvalidOperationException("OCR 引擎池状态异常。");
+        }
         try
         {
             using var bitmap = ToSkBitmap(image);
@@ -47,7 +62,7 @@ public sealed class PaddleOcrService : IOcrService, IOcrLayoutService, IDisposab
                     LimitSideLen = detectorSize,
                     MaxSideLen = detectorSize
                 };
-            var result = await Task.Run(() => _engine.Value.Detect(bitmap, options), ct);
+            var result = await Task.Run(() => _engines[engineIndex].Value.Detect(bitmap, options), ct);
 
             return result.TextBlocks
                 .Where(block => !string.IsNullOrWhiteSpace(block.Text))
@@ -67,6 +82,7 @@ public sealed class PaddleOcrService : IOcrService, IOcrLayoutService, IDisposab
         }
         finally
         {
+            _availableEngines.Enqueue(engineIndex);
             _gate.Release();
         }
     }
@@ -130,7 +146,8 @@ public sealed class PaddleOcrService : IOcrService, IOcrLayoutService, IDisposab
 
     public void Dispose()
     {
-        if (_engine.IsValueCreated) _engine.Value.Dispose();
+        foreach (var engine in _engines)
+            if (engine.IsValueCreated) engine.Value.Dispose();
         _gate.Dispose();
     }
 }

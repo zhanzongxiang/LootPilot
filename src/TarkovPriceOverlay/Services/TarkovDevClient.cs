@@ -19,11 +19,12 @@ public sealed class TarkovDevClient : IPriceDataSource
         _isAvailable = () => !settings.GameMode.Equals("Season", StringComparison.OrdinalIgnoreCase);
     }
     public string Name => "tarkov.dev";
+    public int MinimumExpectedItemCount => 1_000;
 
     private static HttpClient CreateHttpClient()
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("LootPilot/0.10.1");
+        client.DefaultRequestHeaders.UserAgent.ParseAdd(ProductInfo.UserAgent);
         client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         return client;
     }

@@ -4,6 +4,7 @@ using System.Windows.Interop;
 using System.Windows.Threading;
 using TarkovPriceOverlay.Models;
 using TarkovPriceOverlay.Configuration;
+using TarkovPriceOverlay.Services;
 using WinForms = System.Windows.Forms;
 
 namespace TarkovPriceOverlay;
@@ -36,10 +37,14 @@ public partial class OverlayWindow : Window
     public void ShowNearCursor()
     {
         var cursor = WinForms.Cursor.Position;
-        var area = WinForms.Screen.FromPoint(cursor).WorkingArea;
-        Left = Math.Min(cursor.X + 24, area.Right - Width - 8);
-        Top = Math.Min(cursor.Y + 24, area.Bottom - 210);
+        var screen = WinForms.Screen.FromPoint(cursor);
+        var area = screen.WorkingArea;
+        var scale = ScreenCoordinateMapper.GetScale(screen);
+        var width = Width * scale;
+        var left = Math.Clamp(cursor.X + 24, area.Left + 8, area.Right - width - 8);
+        var top = Math.Clamp(cursor.Y + 24, area.Top + 8, area.Bottom - 210 * scale);
         Show();
+        ScreenCoordinateMapper.MoveToPhysical(this, left, top);
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(_durationMs) };
         timer.Tick += (_, _) => { timer.Stop(); Close(); };
         timer.Start();
@@ -53,16 +58,20 @@ public partial class OverlayWindow : Window
                      ?? WinForms.Screen.PrimaryScreen
                      ?? WinForms.Screen.AllScreens[0];
         var area = screen.WorkingArea;
+        var scale = ScreenCoordinateMapper.GetScale(screen);
         var xRatio = Math.Clamp(settings.FixedOverlayXRatio, 0d, 1d);
         var yRatio = Math.Clamp(settings.FixedOverlayYRatio, 0d, 1d);
-        Left = Math.Clamp(area.Left + area.Width * xRatio, area.Left + 8, area.Right - Width - 8);
-        Top = Math.Clamp(area.Top + area.Height * yRatio, area.Top + 8, area.Bottom - 210);
-        ShowWithTimer();
+        var width = Width * scale;
+        var left = Math.Clamp(area.Left + area.Width * xRatio, area.Left + 8, area.Right - width - 8);
+        var top = Math.Clamp(area.Top + area.Height * yRatio, area.Top + 8, area.Bottom - 210 * scale);
+        ShowWithTimer(left, top);
     }
 
-    private void ShowWithTimer()
+    private void ShowWithTimer(double? physicalLeft = null, double? physicalTop = null)
     {
         Show();
+        if (physicalLeft is double left && physicalTop is double top)
+            ScreenCoordinateMapper.MoveToPhysical(this, left, top);
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(_durationMs) };
         timer.Tick += (_, _) => { timer.Stop(); Close(); };
         timer.Start();

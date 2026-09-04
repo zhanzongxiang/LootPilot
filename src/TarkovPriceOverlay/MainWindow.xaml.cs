@@ -20,6 +20,8 @@ public partial class MainWindow : Window
     private readonly GlobalHotkey _hotkey = new();
     private readonly GlobalHotkey _inventoryHotkey = new();
     private readonly DispatcherTimer _refreshTimer = new();
+    private readonly CancellationTokenSource _lifetimeCts = new();
+    private CancellationTokenSource? _scanCts;
     private DateTimeOffset? _nextRefreshAt;
     private bool _busy;
     private bool _loadingSettings;
@@ -38,8 +40,11 @@ public partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _refreshTimer.Stop();
+            _lifetimeCts.Cancel();
+            _scanCts?.Cancel();
             _hotkey.Dispose();
             _inventoryHotkey.Dispose();
+            _lifetimeCts.Dispose();
         };
     }
 
@@ -103,13 +108,24 @@ public partial class MainWindow : Window
         InventoryHotkeyRun.Text = _settings.InventoryHotkey;
     }
 
-    private async void HotkeyPressed(object? sender, EventArgs e) => await ScanAsync();
-    private async void InventoryHotkeyPressed(object? sender, EventArgs e) => await ScanInventoryAsync();
+    private async void HotkeyPressed(object? sender, EventArgs e)
+    {
+        if (_busy) { _scanCts?.Cancel(); return; }
+        await ScanAsync();
+    }
+
+    private async void InventoryHotkeyPressed(object? sender, EventArgs e)
+    {
+        if (_busy) { _scanCts?.Cancel(); return; }
+        await ScanInventoryAsync();
+    }
 
     private async Task ScanAsync()
     {
         if (_busy) return;
         _busy = true;
+        using var scanCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+        _scanCts = scanCts;
         ScanFeedbackWindow? feedback = null;
         CloseScanOverlays();
         await Task.Delay(40);
@@ -118,7 +134,7 @@ public partial class MainWindow : Window
             StatusText.Text = "正在截图并识别…";
             var stopwatch = Stopwatch.StartNew();
             var result = await _coordinator.ScanAsync(
-                () => feedback = ShowFeedback("正在识别单个物品…"));
+                () => feedback = ShowFeedback("正在识别单个物品…"), scanCts.Token);
             stopwatch.Stop();
             ShowResult(result);
             LastResultText.Text += $" · {RecognitionModeText()} {stopwatch.Elapsed.TotalSeconds:0.00}秒";
@@ -126,14 +142,17 @@ public partial class MainWindow : Window
             await Task.Delay(500);
             StatusText.Text = "已就绪";
         }
+        catch (OperationCanceledException) { StatusText.Text = "扫描已取消"; }
         catch (Exception ex) { ShowError(ex); feedback?.SetMessage("识别失败"); await Task.Delay(800); }
-        finally { feedback?.Close(); _busy = false; }
+        finally { feedback?.Close(); if (ReferenceEquals(_scanCts, scanCts)) _scanCts = null; _busy = false; }
     }
 
     private async Task ScanInventoryAsync()
     {
         if (_busy) return;
         _busy = true;
+        using var scanCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+        _scanCts = scanCts;
         ScanFeedbackWindow? feedback = null;
         CloseScanOverlays();
         await Task.Delay(40);
@@ -142,7 +161,7 @@ public partial class MainWindow : Window
             StatusText.Text = "正在扫描仓库和随身物品区域…";
             var stopwatch = Stopwatch.StartNew();
             var items = await _inventoryCoordinator.ScanAsync(
-                () => feedback = ShowFeedback("正在扫描并读取物价…"));
+                () => feedback = ShowFeedback("正在扫描并读取物价…"), scanCts.Token);
             stopwatch.Stop();
             if (items.Count == 0)
             {
@@ -169,8 +188,9 @@ public partial class MainWindow : Window
             }
             StatusText.Text = "已就绪";
         }
+        catch (OperationCanceledException) { StatusText.Text = "扫描已取消"; }
         catch (Exception ex) { ShowError(ex); feedback?.SetMessage("扫描失败"); await Task.Delay(800); }
-        finally { feedback?.Close(); _busy = false; }
+        finally { feedback?.Close(); if (ReferenceEquals(_scanCts, scanCts)) _scanCts = null; _busy = false; }
     }
 
     private static void CloseScanOverlays()

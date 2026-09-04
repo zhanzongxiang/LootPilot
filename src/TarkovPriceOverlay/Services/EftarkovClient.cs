@@ -13,6 +13,7 @@ public sealed class EftarkovClient : IPriceDataSource
     private readonly Func<string> _urlProvider;
     private readonly Func<string>? _modeProvider;
     public string Name => _modeProvider is null ? "eftarkov.com" : $"eftarkov.com ({_modeProvider()})";
+    public int MinimumExpectedItemCount => 1_000;
 
     public EftarkovClient(string url)
     {
@@ -32,7 +33,7 @@ public sealed class EftarkovClient : IPriceDataSource
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
         _http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("LootPilot/0.10.16");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd(ProductInfo.UserAgent);
         _http.DefaultRequestHeaders.Referrer = new Uri("https://www.eftarkov.com/news/web_209.html");
     }
 

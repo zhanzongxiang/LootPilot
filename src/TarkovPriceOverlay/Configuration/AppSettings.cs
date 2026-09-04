@@ -55,22 +55,83 @@ public sealed class AppSettings
 
     public static AppSettings Load()
     {
-        var userPath = UserSettingsPath;
         var bundledPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
-        var path = File.Exists(userPath) ? userPath : bundledPath;
-        if (!File.Exists(path)) return new();
-        var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path),
-            new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new();
-        if (settings.TesseractLanguage.Contains("chi_sim", StringComparison.OrdinalIgnoreCase))
-            settings.OcrImageScale = Math.Max(3, settings.OcrImageScale);
-        return settings;
+        return LoadFromPaths(UserSettingsPath, bundledPath);
     }
+
+    internal static AppSettings LoadFromPaths(params string[] paths)
+    {
+        foreach (var path in paths
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!File.Exists(path)) continue;
+            try
+            {
+                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path),
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (settings is null) continue;
+                NormalizeLoadedSettings(settings);
+                if (settings.TesseractLanguage.Contains("chi_sim", StringComparison.OrdinalIgnoreCase))
+                    settings.OcrImageScale = Math.Max(3, settings.OcrImageScale);
+                return settings;
+            }
+            catch (JsonException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return new();
+    }
+
+    private static void NormalizeLoadedSettings(AppSettings settings)
+    {
+        var defaults = new AppSettings();
+        settings.GameMode = OrDefault(settings.GameMode, defaults.GameMode);
+        settings.Theme = OrDefault(settings.Theme, defaults.Theme);
+        settings.RecognitionMode = OrDefault(settings.RecognitionMode, defaults.RecognitionMode);
+        settings.Hotkey = OrDefault(settings.Hotkey, defaults.Hotkey);
+        settings.InventoryHotkey = OrDefault(settings.InventoryHotkey, defaults.InventoryHotkey);
+        settings.ApiUrl = OrDefault(settings.ApiUrl, defaults.ApiUrl);
+        settings.EftarkovApiUrl = OrDefault(settings.EftarkovApiUrl, defaults.EftarkovApiUrl);
+        settings.CachePath = OrDefault(settings.CachePath, defaults.CachePath);
+        settings.CaptureMode = OrDefault(settings.CaptureMode, defaults.CaptureMode);
+        settings.TesseractPath = OrDefault(settings.TesseractPath, defaults.TesseractPath);
+        settings.TessdataPath = OrDefault(settings.TessdataPath, defaults.TessdataPath);
+        settings.TesseractLanguage = OrDefault(
+            settings.TesseractLanguage, defaults.TesseractLanguage);
+        settings.DisplayScalingMode = OrDefault(
+            settings.DisplayScalingMode, defaults.DisplayScalingMode);
+        settings.RefreshIntervalMinutes = PositiveOrDefault(
+            settings.RefreshIntervalMinutes, defaults.RefreshIntervalMinutes);
+        settings.CaptureWidth = PositiveOrDefault(settings.CaptureWidth, defaults.CaptureWidth);
+        settings.CaptureHeight = PositiveOrDefault(settings.CaptureHeight, defaults.CaptureHeight);
+        settings.OcrImageScale = PositiveOrDefault(settings.OcrImageScale, defaults.OcrImageScale);
+        settings.OverlayDurationMs = PositiveOrDefault(
+            settings.OverlayDurationMs, defaults.OverlayDurationMs);
+        settings.InventoryOverlayDurationMs = PositiveOrDefault(
+            settings.InventoryOverlayDurationMs, defaults.InventoryOverlayDurationMs);
+        settings.MinimumDisplayPrice = Math.Max(0, settings.MinimumDisplayPrice);
+        settings.GameUiScalePercent = Math.Clamp(settings.GameUiScalePercent, 70, 130);
+    }
+
+    private static string OrDefault(string? value, string fallback) =>
+        string.IsNullOrWhiteSpace(value) ? fallback : value;
+
+    private static int PositiveOrDefault(int value, int fallback) => value > 0 ? value : fallback;
 
     public void Save()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(UserSettingsPath)!);
-        File.WriteAllText(UserSettingsPath, JsonSerializer.Serialize(this,
-            new JsonSerializerOptions { WriteIndented = true }));
+        var temp = UserSettingsPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temp, JsonSerializer.Serialize(this,
+                new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temp, UserSettingsPath, true);
+        }
+        finally
+        {
+            if (File.Exists(temp)) File.Delete(temp);
+        }
     }
 
     public string ExpandedCachePath => Environment.ExpandEnvironmentVariables(CachePath)
