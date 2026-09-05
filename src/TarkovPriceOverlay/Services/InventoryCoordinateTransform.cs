@@ -12,7 +12,7 @@ public readonly record struct InventoryCoordinateTransform(
     public int Y(float referenceY) => (int)Math.Round(OffsetY + referenceY * ScaleY);
 
     public static InventoryCoordinateTransform Create(
-        int width, int height, AppSettings settings)
+        int width, int height, AppSettings settings, int? gameUiScalePercent = null)
     {
         var mode = settings.DisplayScalingMode.ToLowerInvariant();
         var rawX = width / ReferenceWidth;
@@ -42,7 +42,7 @@ public readonly record struct InventoryCoordinateTransform(
             offsetX = offsetY = 0;
         }
 
-        var uiScale = Math.Clamp(settings.GameUiScalePercent, 70, 130) / 100f;
+        var uiScale = Math.Clamp(gameUiScalePercent ?? settings.GameUiScalePercent, 70, 130) / 100f;
         if (Math.Abs(uiScale - 1f) > 0.001f)
         {
             var oldWidth = ReferenceWidth * scaleX;

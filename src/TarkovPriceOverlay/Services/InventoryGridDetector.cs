@@ -37,31 +37,33 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
     public IReadOnlyList<InventoryGridRegion> Detect(Bitmap frame)
     {
         var results = new List<InventoryGridRegion>();
-        var right = DetectRightPanel(frame);
+        var configuredTransform = InventoryCoordinateTransform.Create(
+            frame.Width, frame.Height, _settings);
+        var right = DetectRightPanel(frame, configuredTransform);
         if (right is not null) results.Add(right);
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
+        var transform = right is null ? configuredTransform : CalibrateTransform(right);
         var sx = transform.ScaleX;
         var sy = transform.ScaleY;
         var dynamicRegions = _settings.EnableLocalGridCalibration
-            ? _dynamicGridDetector.Detect(frame) : [];
+            ? _dynamicGridDetector.Detect(frame, transform) : [];
         var offsetX = right?.Bounds.Left - (int)Math.Round(1263f * sx) ??
                       (int)Math.Round(transform.OffsetX);
         var offsetY = right?.Bounds.Top - (int)Math.Round(78f * sy) ??
                       (int)Math.Round(transform.OffsetY);
         results.Add(CreateFixedRegion(frame, 655, 165, 2, 2, 65f, 64f,
-            "已装备胸挂", 0.84, offsetX, offsetY));
+            "已装备胸挂", 0.84, transform, offsetX, offsetY));
         var dynamicRig = dynamicRegions.FirstOrDefault(region => region.Kind == "弹挂");
         var dynamicPockets = dynamicRegions.FirstOrDefault(region => region.Kind == "口袋");
         // If pockets have scrolled into the upper half, the rig itself is
         // already above the viewport; do not revive its old fixed rectangle.
         var rig = dynamicRig ?? (dynamicPockets?.Bounds.Y < (int)Math.Round(350f * sy)
             ? null
-            : DetectTacticalRig(frame, offsetX, offsetY));
+            : DetectTacticalRig(frame, transform, offsetX, offsetY));
         if (rig is not null) results.Add(rig);
-        var pockets = dynamicPockets ?? DetectPockets(frame, offsetX, offsetY);
+        var pockets = dynamicPockets ?? DetectPockets(frame, transform, offsetX, offsetY);
         if (pockets is not null) results.Add(pockets);
         results.Add(CreateFixedRegion(frame, 655, 582, 2, 2, 65f, 64f,
-            "已装备背包", 0.80, offsetX, offsetY));
+            "已装备背包", 0.80, transform, offsetX, offsetY));
         // Prefer a lattice discovered from the visible backpack itself. This
         // follows scrolling and different bag dimensions while the remaining
         // equipment regions keep their proven fixed-layout fallback.
@@ -73,7 +75,7 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
             .ThenBy(region => region.Bounds.Y)
             .FirstOrDefault();
         var backpack = dynamicBackpack is null
-            ? DetectBackpack(frame, offsetX, offsetY)
+            ? DetectBackpack(frame, transform, offsetX, offsetY)
             : dynamicBackpack with { Kind = "背包", Confidence = Math.Max(0.86, dynamicBackpack.Confidence) };
         if (backpack is not null) results.Add(backpack);
         var secure = dynamicRegions
@@ -82,7 +84,7 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
                                           (int)Math.Round(10f * sy))
                          .OrderBy(region => region.Bounds.Y)
                          .FirstOrDefault() ??
-                     DetectSecureContainer(frame, offsetX, offsetY);
+                     DetectSecureContainer(frame, transform, offsetX, offsetY);
         if (secure is not null && (backpack is null ||
             IntersectionRatio(secure.Bounds, backpack.Bounds) < 0.25))
             results.Add(secure);
@@ -107,10 +109,11 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
         float referenceCellHeight,
         string kind,
         double confidence,
+        InventoryCoordinateTransform calibratedTransform,
         int offsetX = 0,
         int offsetY = 0)
     {
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
+        var transform = calibratedTransform;
         var sx = transform.ScaleX;
         var sy = transform.ScaleY;
         var x = (int)Math.Round(referenceX * sx) + offsetX;
@@ -123,41 +126,92 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
             cellWidth, cellHeight, kind, confidence);
     }
 
-    private InventoryGridRegion? DetectRightPanel(Bitmap frame)
+    private InventoryGridRegion? DetectRightPanel(
+        Bitmap frame, InventoryCoordinateTransform configuredTransform)
     {
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
-        var sx = transform.ScaleX;
-        var sy = transform.ScaleY;
-        var cell = ReferenceCell * sx;
-        var expectedX = transform.OffsetX + 1263f * sx;
-        var expectedY = transform.OffsetY + 78f * sy;
-        var x = _settings.EnableLocalGridCalibration
-            ? FindVerticalAnchor(frame, expectedX, expectedY, cell)
-            : (int)Math.Round(expectedX);
-        var y = _settings.EnableLocalGridCalibration
-            ? FindHorizontalAnchor(frame, expectedX, expectedY, cell, searchRadius: 36)
-            : (int)Math.Round(expectedY);
-        if (x < 0 || y < 0) return null;
+        InventoryGridRegion? best = null;
+        var bestScore = double.MinValue;
+        foreach (var transform in CandidateTransforms(frame, configuredTransform))
+        {
+            var sx = transform.ScaleX;
+            var sy = transform.ScaleY;
+            var cell = ReferenceCell * sx;
+            var expectedX = transform.X(1263);
+            var expectedY = transform.Y(78);
+            var x = _settings.EnableLocalGridCalibration
+                ? FindVerticalAnchor(frame, expectedX, expectedY, cell,
+                    Math.Max(22, (int)Math.Round(26 * sx / Math.Max(configuredTransform.ScaleX, 0.01f))))
+                : expectedX;
+            var y = _settings.EnableLocalGridCalibration
+                ? FindHorizontalAnchor(frame, expectedX, expectedY, cell,
+                    Math.Max(16, (int)Math.Round(36 * sy / Math.Max(configuredTransform.ScaleY, 0.01f))))
+                : expectedY;
+            if (x < 0 || y < 0) continue;
 
-        var maxColumns = Math.Min(10, (int)((frame.Width - x) / cell));
-        // Stash height varies with layout and can continue below the old
-        // carried-inventory cutoff. Follow the visible screen to the bottom.
-        var maxRows = Math.Min(16, Math.Max(3, (int)((frame.Height - y) / cell)));
-        var columns = FindBoundaryExtent(frame, x, y, cell, maxColumns, horizontal: true, minimum: 3);
-        var rows = FindBoundaryExtent(frame, x, y, cell, maxRows, horizontal: false, minimum: 3);
-        if (columns < 3 || rows < 3) return null;
+            var maxColumns = Math.Min(10, (int)((frame.Width - x) / cell));
+            var maxRows = Math.Min(16, Math.Max(3, (int)((frame.Height - y) / cell)));
+            if (maxColumns < 3 || maxRows < 3) continue;
+            var columns = FindBoundaryExtent(frame, x, y, cell, maxColumns,
+                horizontal: true, minimum: 3);
+            var rows = FindBoundaryExtent(frame, x, y, cell, maxRows,
+                horizontal: false, minimum: 3);
+            if (columns < 3 || rows < 3) continue;
 
-        var kind = columns >= 9 && rows >= 10 ? "仓库" : "容器";
-        var bounds = Rectangle.FromLTRB(
-            x, y,
-            Math.Min(frame.Width, (int)Math.Round(x + columns * cell)),
-            Math.Min(frame.Height, (int)Math.Round(y + rows * cell)));
-        return new(bounds, columns, rows, cell, cell, kind, 0.92);
+            var evidence = GridEvidence(frame, x, y, cell, columns, rows);
+            var scalePenalty = Math.Abs(sx - configuredTransform.ScaleX) * 0.10;
+            var score = evidence - scalePenalty;
+            if (score <= bestScore) continue;
+
+            var bounds = Rectangle.FromLTRB(
+                x, y,
+                Math.Min(frame.Width, (int)Math.Round(x + columns * cell)),
+                Math.Min(frame.Height, (int)Math.Round(y + rows * cell)));
+            var kind = columns >= 9 && rows >= 10 ? "仓库" : "容器";
+            best = new(bounds, columns, rows, cell, cell, kind, 0.92);
+            bestScore = score;
+        }
+        return best;
     }
 
-    private InventoryGridRegion? DetectTacticalRig(Bitmap frame, int offsetX, int offsetY)
+    private IEnumerable<InventoryCoordinateTransform> CandidateTransforms(
+        Bitmap frame, InventoryCoordinateTransform configuredTransform)
     {
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
+        if (!_settings.EnableLocalGridCalibration || frame.Width < 2000)
+            return [configuredTransform];
+
+        var configuredScale = Math.Clamp(_settings.GameUiScalePercent, 70, 130);
+        return Enumerable.Range(70, 61)
+            .Where(scale => scale % 2 == 0 || scale == configuredScale)
+            .Append(configuredScale)
+            .Distinct()
+            .Select(scale => InventoryCoordinateTransform.Create(
+                frame.Width, frame.Height, _settings, scale));
+    }
+
+    private static InventoryCoordinateTransform CalibrateTransform(
+        InventoryGridRegion right) => new(
+        right.CellWidth / ReferenceCell,
+        right.CellHeight / ReferenceCell,
+        right.Bounds.Left - 1263f * right.CellWidth / ReferenceCell,
+        right.Bounds.Top - 78f * right.CellHeight / ReferenceCell);
+
+    private static double GridEvidence(
+        Bitmap image, int x, int y, float cell, int columns, int rows)
+    {
+        var right = Math.Min(image.Width - 1, (int)Math.Round(x + columns * cell));
+        var bottom = Math.Min(image.Height - 1, (int)Math.Round(y + rows * cell));
+        var vertical = Enumerable.Range(0, columns + 1)
+            .Average(index => VerticalLineScore(image,
+                (int)Math.Round(x + index * cell), y, bottom));
+        var horizontal = Enumerable.Range(0, rows + 1)
+            .Average(index => HorizontalLineScore(image,
+                (int)Math.Round(y + index * cell), x, right));
+        return Math.Min(vertical, horizontal);
+    }
+
+    private InventoryGridRegion? DetectTacticalRig(
+        Bitmap frame, InventoryCoordinateTransform transform, int offsetX, int offsetY)
+    {
         var sx = transform.ScaleX;
         var sy = transform.ScaleY;
         var cellWidth = 68f * sx;
@@ -178,11 +232,13 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
             5, 4, cellWidth, cellHeight, "弹挂", 0.78);
     }
 
-    private InventoryGridRegion? DetectPockets(Bitmap frame, int offsetX, int offsetY) => DetectFixedRegion(
-        frame, 655, 470, 4, 1, 68.5f, 64f, "口袋", 0.72, offsetX, offsetY);
+    private InventoryGridRegion? DetectPockets(
+        Bitmap frame, InventoryCoordinateTransform transform, int offsetX, int offsetY) => DetectFixedRegion(
+        frame, 655, 470, 4, 1, 68.5f, 64f, "口袋", 0.72, transform, offsetX, offsetY);
 
-    private InventoryGridRegion? DetectSecureContainer(Bitmap frame, int offsetX, int offsetY) => DetectFixedRegion(
-        frame, 655, 751, 7, 2, 65f, 64f, "安全箱", 0.70, offsetX, offsetY);
+    private InventoryGridRegion? DetectSecureContainer(
+        Bitmap frame, InventoryCoordinateTransform transform, int offsetX, int offsetY) => DetectFixedRegion(
+        frame, 655, 751, 7, 2, 65f, 64f, "安全箱", 0.70, transform, offsetX, offsetY);
 
     private InventoryGridRegion? DetectFixedRegion(
         Bitmap frame,
@@ -194,10 +250,11 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
         float referenceCellHeight,
         string kind,
         double confidence,
+        InventoryCoordinateTransform calibratedTransform,
         int offsetX,
         int offsetY)
     {
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
+        var transform = calibratedTransform;
         var sx = transform.ScaleX;
         var sy = transform.ScaleY;
         var x = (int)Math.Round(referenceX * sx) + offsetX;
@@ -218,9 +275,9 @@ public sealed class InventoryGridDetector : IInventoryGridDetector
             columns, rows, cellWidth, cellHeight, kind, confidence);
     }
 
-    private InventoryGridRegion? DetectBackpack(Bitmap frame, int offsetX, int offsetY)
+    private InventoryGridRegion? DetectBackpack(
+        Bitmap frame, InventoryCoordinateTransform transform, int offsetX, int offsetY)
     {
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
         var sx = transform.ScaleX;
         var sy = transform.ScaleY;
         var cell = ReferenceCell * sx;

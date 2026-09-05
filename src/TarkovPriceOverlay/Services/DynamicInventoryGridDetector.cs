@@ -14,10 +14,12 @@ public sealed class DynamicInventoryGridDetector
     public DynamicInventoryGridDetector(AppSettings? settings = null) =>
         _settings = settings ?? new AppSettings();
 
-    public IReadOnlyList<InventoryGridRegion> Detect(Bitmap frame)
+    public IReadOnlyList<InventoryGridRegion> Detect(
+        Bitmap frame, InventoryCoordinateTransform? calibratedTransform = null)
     {
         using var pixels = new LumaPixels(frame);
-        var transform = InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
+        var transform = calibratedTransform ??
+                        InventoryCoordinateTransform.Create(frame.Width, frame.Height, _settings);
         var sx = transform.ScaleX;
         var sy = transform.ScaleY;
         var ox = transform.OffsetX;
