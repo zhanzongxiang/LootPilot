@@ -54,6 +54,28 @@ public sealed class ItemCatalogServiceTests
     }
 
     [Fact]
+    public async Task CandidateSearchKeepsAmbiguousItemsForVisualDisambiguation()
+    {
+        using var temp = new TemporaryDirectory();
+        var source = new TestPriceSource(
+            new ItemPrice("one", "Makarov PM pistol", "PM", 2, 1, 10_000, 5_000, "Prapor", false, false)
+            {
+                IconUrl = "https://example.test/one.webp"
+            },
+            new ItemPrice("two", "PM magazine", "PM", 1, 1, 8_000, 4_000, "Prapor", false, false)
+            {
+                IconUrl = "https://example.test/two.webp"
+            });
+        var catalog = new ItemCatalogService(new JsonItemCache(System.IO.Path.Combine(temp.Path, "items.json")), [source]);
+
+        await catalog.RefreshAsync();
+        var candidates = catalog.FindCandidates("PM");
+
+        Assert.Equal(2, candidates.Count);
+        Assert.All(candidates, candidate => Assert.Equal(1, candidate.Score));
+    }
+
+    [Fact]
     public async Task EmptyRefreshKeepsLastValidCatalog()
     {
         using var temp = new TemporaryDirectory();
@@ -105,6 +127,24 @@ public sealed class ItemCatalogServiceTests
         Assert.True(item?.UsedInTasks);
         Assert.True(item?.UsedInHideout);
         Assert.Equal(12_000, item?.FleaPrice);
+    }
+
+    [Fact]
+    public async Task SecondarySourceEnrichesMissingIconUrl()
+    {
+        using var temp = new TemporaryDirectory();
+        var primary = new TestPriceSource(new ItemPrice(
+            "one", "Icon item", "ICON", 1, 1, 12_000, 5_000, "Prapor", false, false));
+        var metadata = new TestPriceSource(new ItemPrice(
+            "one", "Icon item", "ICON", 1, 1, null, null, null, false, false)
+        {
+            IconUrl = "https://example.test/icon.webp"
+        });
+        var catalog = new ItemCatalogService(
+            new JsonItemCache(System.IO.Path.Combine(temp.Path, "items.json")), [primary, metadata]);
+
+        Assert.True(await catalog.RefreshAsync());
+        Assert.Equal("https://example.test/icon.webp", catalog.FindBest("Icon item").Item?.IconUrl);
     }
 
     [Fact]

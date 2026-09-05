@@ -59,9 +59,15 @@ public sealed class EftarkovClient : IPriceDataSource
             return new ItemPrice(
                 x.Id, x.Name, x.ShortName, Math.Max(1, x.Width), Math.Max(1, x.Height),
                 x.LastLowPrice, bestTrader?.PriceRub ?? bestTrader?.Price,
-                bestTrader?.Trader?.Name, false, false);
+                bestTrader?.Trader?.Name, false, false)
+            {
+                IconUrl = x.Image8xLink ?? x.IconLink ?? FallbackIconUrl(x.Id)
+            };
         }).ToList();
     }
+
+    private static string FallbackIconUrl(string id) =>
+        $"https://assets.tarkov.dev/{Uri.EscapeDataString(id)}-icon.jpg";
 
     private sealed class EftResponse
     {
@@ -80,6 +86,8 @@ public sealed class EftarkovClient : IPriceDataSource
         [JsonPropertyName("id")] public string Id { get; set; } = "";
         [JsonPropertyName("name")] public string Name { get; set; } = "";
         [JsonPropertyName("shortName")] public string ShortName { get; set; } = "";
+        [JsonPropertyName("iconLink")] public string? IconLink { get; set; }
+        [JsonPropertyName("image8xLink")] public string? Image8xLink { get; set; }
         [JsonPropertyName("width")] public int Width { get; set; }
         [JsonPropertyName("height")] public int Height { get; set; }
         [JsonPropertyName("lastLowPrice")] public int? LastLowPrice { get; set; }

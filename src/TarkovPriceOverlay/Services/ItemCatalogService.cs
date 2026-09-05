@@ -104,7 +104,8 @@ public sealed class ItemCatalogService
             return item with
             {
                 UsedInTasks = item.UsedInTasks || old?.UsedInTasks == true || metadataItem?.UsedInTasks == true,
-                UsedInHideout = item.UsedInHideout || old?.UsedInHideout == true || metadataItem?.UsedInHideout == true
+                UsedInHideout = item.UsedInHideout || old?.UsedInHideout == true || metadataItem?.UsedInHideout == true,
+                IconUrl = item.IconUrl ?? old?.IconUrl ?? metadataItem?.IconUrl
             };
         }).ToList();
     }
@@ -205,6 +206,36 @@ public sealed class ItemCatalogService
         if (ranked.Count > 1 && ranked[0].Score < 0.90 && ranked[0].Score - ranked[1].Score < 0.07)
             return (null, 0);
         return ranked[0];
+    }
+
+    public IReadOnlyList<(ItemPrice Item, double Score)> FindCandidates(
+        string text, int maximum = 16)
+    {
+        var normalized = Normalize(text);
+        if (normalized.Length == 0 || _items.Count == 0 || maximum <= 0) return [];
+        var candidates = _items.SelectMany(item => new[]
+        {
+            (Item: item, Alias: Normalize(item.Name)),
+            (Item: item, Alias: Normalize(item.ShortName))
+        })
+        .Where(x => x.Alias.Length > 0)
+        .Select(x =>
+        {
+            var score = normalized.Equals(x.Alias, StringComparison.OrdinalIgnoreCase) ? 1d
+                : normalized.Contains(x.Alias, StringComparison.OrdinalIgnoreCase) ||
+                  x.Alias.Contains(normalized, StringComparison.OrdinalIgnoreCase)
+                    ? 0.94d
+                    : Similarity(normalized, x.Alias);
+            return (x.Item, Score: score);
+        })
+        .GroupBy(x => x.Item.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.OrderByDescending(x => x.Score).First())
+        .Where(x => x.Score >= 0.45)
+        .OrderByDescending(x => x.Score)
+        .ThenBy(x => x.Item.Id, StringComparer.OrdinalIgnoreCase)
+        .Take(maximum)
+        .ToList();
+        return candidates;
     }
 
     private static string Normalize(string value) =>

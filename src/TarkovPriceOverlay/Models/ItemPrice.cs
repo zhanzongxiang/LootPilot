@@ -12,6 +12,7 @@ public sealed record ItemPrice(
     bool UsedInTasks,
     bool UsedInHideout)
 {
+    public string? IconUrl { get; init; }
     public int Slots => Math.Max(1, Width * Height);
     public int? BestPrice => Math.Max(FleaPrice ?? 0, TraderPrice ?? 0) is var value && value > 0 ? value : null;
     public int? PricePerSlot => BestPrice is int value ? value / Slots : null;

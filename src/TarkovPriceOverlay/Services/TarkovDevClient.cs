@@ -36,7 +36,7 @@ public sealed class TarkovDevClient : IPriceDataSource
         const string query = """
         query Items {
           items {
-            id name shortName width height avg24hPrice
+            id name shortName width height avg24hPrice iconLink image8xLink
             sellFor { price vendor { name } }
             usedInTasks { id }
             hideoutModules { id }
@@ -57,9 +57,15 @@ public sealed class TarkovDevClient : IPriceDataSource
                 .OrderByDescending(s => s.Price).FirstOrDefault();
             return new ItemPrice(x.Id, x.Name, x.ShortName, x.Width, x.Height,
                 x.Avg24hPrice, bestTrader?.Price, bestTrader?.Vendor.Name,
-                x.UsedInTasks?.Count > 0, x.HideoutModules?.Count > 0);
+                x.UsedInTasks?.Count > 0, x.HideoutModules?.Count > 0)
+            {
+                IconUrl = x.Image8xLink ?? x.IconLink ?? FallbackIconUrl(x.Id)
+            };
         }).ToList() ?? [];
     }
+
+    private static string FallbackIconUrl(string id) =>
+        $"https://assets.tarkov.dev/{Uri.EscapeDataString(id)}-icon.jpg";
 
     private sealed class GraphResponse
     {
@@ -73,6 +79,8 @@ public sealed class TarkovDevClient : IPriceDataSource
         [JsonPropertyName("id")] public string Id { get; set; } = "";
         [JsonPropertyName("name")] public string Name { get; set; } = "";
         [JsonPropertyName("shortName")] public string ShortName { get; set; } = "";
+        [JsonPropertyName("iconLink")] public string? IconLink { get; set; }
+        [JsonPropertyName("image8xLink")] public string? Image8xLink { get; set; }
         [JsonPropertyName("width")] public int Width { get; set; }
         [JsonPropertyName("height")] public int Height { get; set; }
         [JsonPropertyName("avg24hPrice")] public int? Avg24hPrice { get; set; }

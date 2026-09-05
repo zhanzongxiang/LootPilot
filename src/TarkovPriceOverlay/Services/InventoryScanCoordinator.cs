@@ -13,6 +13,7 @@ public sealed class InventoryScanCoordinator
     private readonly ItemCatalogService _catalog;
     private readonly AppSettings _settings;
     private readonly SemaphoreSlim _gridConcurrency = new(2, 2);
+    private readonly InventoryImageMatcher _imageMatcher;
 
     public InventoryScanCoordinator(
         ScreenCaptureService capture,
@@ -20,9 +21,13 @@ public sealed class InventoryScanCoordinator
         IInventoryOccupancyDetector occupancy,
         IOcrLayoutService ocr,
         ItemCatalogService catalog,
-        AppSettings settings)
-        => (_capture, _grids, _occupancy, _ocr, _catalog, _settings) =
+        AppSettings settings,
+        InventoryImageMatcher? imageMatcher = null)
+    {
+        (_capture, _grids, _occupancy, _ocr, _catalog, _settings) =
             (capture, grids, occupancy, ocr, catalog, settings);
+        _imageMatcher = imageMatcher ?? new InventoryImageMatcher();
+    }
 
     public async Task<IReadOnlyList<DetectedInventoryItem>> ScanAsync(
         Action? onCaptured = null, CancellationToken ct = default)
@@ -168,7 +173,9 @@ public sealed class InventoryScanCoordinator
                 .Where(char.IsLetterOrDigit).ToArray());
             var containsCjk = text.Any(character => character is >= '\u3400' and <= '\u9FFF');
             if (!containsCjk && normalizedText.Length <= 2 &&
-                normalizedText is not ("TT" or "PP" or "F1")) continue;
+                normalizedText is not ("TT" or "PP" or "F1") &&
+                !_catalog.FindCandidates(text).Any(candidate => candidate.Score >= 0.99))
+                continue;
             var (item, score) = _catalog.FindBest(text);
             // A detector block can bridge neighboring slots. Prefer an atomic
             // token when it independently gives a stronger catalog match.
@@ -187,7 +194,28 @@ public sealed class InventoryScanCoordinator
             var ocrConfidence = cellWords.Average(x => x.Word.Confidence);
             var combined = score * 0.8 + ocrConfidence * 0.2;
             var minimumCatalogScore = containsCjk ? 0.76 : 0.84;
-            if (item is null || score < minimumCatalogScore || combined < 0.78) continue;
+            var visualResolved = false;
+            if (item is null || score < minimumCatalogScore)
+            {
+                var visualCandidates = _catalog.FindCandidates(text);
+                if (visualCandidates.Count > 0)
+                {
+                    var visual = await _imageMatcher.MatchAsync(
+                        candidate => CropItemIcon(frame, grid, cell.Key.Column, cell.Key.Row,
+                            candidate.Width, candidate.Height),
+                        visualCandidates, ct);
+                    if (visual.Item is not null)
+                    {
+                        item = visual.Item;
+                        visualResolved = true;
+                        score = Math.Max(score, visual.Score);
+                        combined = Math.Max(combined,
+                            visual.Score * 0.8 + ocrConfidence * 0.2);
+                    }
+                }
+            }
+            if (item is null || (!visualResolved && score < minimumCatalogScore) ||
+                visualResolved && score < 0.62 || combined < 0.78) continue;
 
             var anchor = cellWords.Select(candidate =>
                 {
@@ -298,16 +326,59 @@ public sealed class InventoryScanCoordinator
                     .Select(block => block.Text));
                 if (text.Count(char.IsLetterOrDigit) < 2) continue;
                 var (item, score) = _catalog.FindBest(text);
-                if (item is null || score < 0.84) continue;
                 var confidence = score * 0.8 + cell.Average(block => block.Confidence) * 0.2;
+                var visualResolved = false;
+                if (item is null || score < 0.84)
+                {
+                    var visualCandidates = _catalog.FindCandidates(text);
+                    if (visualCandidates.Count > 0)
+                    {
+                        var visual = await _imageMatcher.MatchAsync(
+                            candidate => CropItemIcon(frame, grid,
+                                column + candidate.Width - 1, row,
+                                candidate.Width, candidate.Height),
+                            visualCandidates, ct);
+                        if (visual.Item is not null)
+                        {
+                            item = visual.Item;
+                            visualResolved = true;
+                            score = Math.Max(score, visual.Score);
+                            confidence = Math.Max(confidence,
+                                visual.Score * 0.8 + cell.Average(block => block.Confidence) * 0.2);
+                        }
+                    }
+                }
+                if (item is null || (!visualResolved && score < 0.76) ||
+                    visualResolved && score < 0.62) continue;
                 if (confidence < 0.78) continue;
+                var rightColumn = Math.Min(grid.VisibleColumns - 1,
+                    column + item.Width - 1);
                 Rectangle bounds;
                 lock (frame.Image)
-                    bounds = CreateItemBounds(frame, grid, column, row, item.Width, item.Height);
+                    bounds = CreateItemBounds(frame, grid, rightColumn, row,
+                        item.Width, item.Height);
                 results.Add(new(item, bounds, confidence, grid.Kind, text));
             }
         }
         return results;
+    }
+
+    private static Bitmap? CropItemIcon(
+        CapturedRegion frame, InventoryGridRegion grid, int rightColumn, int row,
+        int itemWidth, int itemHeight)
+    {
+        var bounds = CreateItemBounds(frame, grid, rightColumn, row, itemWidth, itemHeight);
+        var crop = bounds;
+        crop.Offset(-frame.Origin.X, -frame.Origin.Y);
+        var trimX = Math.Clamp((int)Math.Round(crop.Width * 0.06), 2, 6);
+        var trimTop = Math.Clamp((int)Math.Round(crop.Height * 0.18), 5, 16);
+        var trimBottom = Math.Clamp((int)Math.Round(crop.Height * 0.04), 2, 5);
+        crop = Rectangle.FromLTRB(crop.Left + trimX, crop.Top + trimTop,
+            crop.Right - trimX, crop.Bottom - trimBottom);
+        crop.Intersect(new Rectangle(Point.Empty, frame.Image.Size));
+        if (crop.Width < 12 || crop.Height < 12) return null;
+        lock (frame.Image)
+            return frame.Image.Clone(crop, frame.Image.PixelFormat);
     }
 
     private static bool IsCellCovered(
